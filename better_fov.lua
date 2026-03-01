@@ -9,9 +9,9 @@ local DEBUG_LOG_PATH = "better_fov_debug_log.json"
 
 local cfg = {
     enabled = true,
-    exploration_fov = 0.0,
+    exploration_fov = 45.0,
     aiming_fov = 40.0,
-    sprinting_fov = 0.0,
+    sprinting_fov = 45.0,
     cutscene_fov = 24.0,
     normal_fov_during_cutscene = true,
     smooth_fov_transitions = true,
@@ -19,13 +19,13 @@ local cfg = {
     fov_return_speed = 11.0,
 
     use_crouch_fov = false,
-    crouch_fov = 0.0,
+    crouch_fov = 45.0,
 
     use_reload_fov = false,
-    reload_fov = 0.0,
+    reload_fov = 45.0,
 
     use_melee_fov = false,
-    melee_fov = 0.0,
+    melee_fov = 45.0,
 
     debug_ui = false,
 }
@@ -96,10 +96,6 @@ local state = {
 }
 
 local script_start_time = os.clock()
-
-local camera_t = sdk.find_type_definition("via.Camera")
-local camera_get_fov = camera_t and camera_t:get_method("get_FOV") or nil
-local camera_set_fov = camera_t and camera_t:get_method("set_FOV") or nil
 
 local last_player_camera_update_args = nil
 
@@ -277,6 +273,22 @@ local function set_mode_fov_if_unset(mode, fov)
     cfg[key] = fov
     json.dump_file(CFG_PATH, cfg)
     return true
+end
+
+local function get_default_fov_for_mode(mode)
+    if mode == "Exploration" then
+        return DEFAULT_EXPLORATION_FOV
+    elseif mode == "Aiming" then
+        return DEFAULT_AIMING_FOV
+    elseif mode == "Sprinting" then
+        return DEFAULT_SPRINTING_FOV
+    elseif mode == "Cutscene" or mode == "Cutscene (Normal)" then
+        return DEFAULT_CUTSCENE_FOV
+    elseif mode == "Reload" or mode == "Melee" or mode == "Crouching" then
+        return DEFAULT_EXTRA_FOV
+    end
+
+    return nil
 end
 
 local CFG_TYPES = {
@@ -739,9 +751,11 @@ local SPRINT_WALK_MIN_SPEED = 1.35
 local SPRINT_WALK_MAX_SPEED = 2.02
 local SPRINT_WALK_CANCEL_DELAY = 0.10
 local SPRINT_STOP_CANCEL_DELAY = 0.12
-local BASE_GAME_FOV_FALLBACK = 45.0
+local DEFAULT_EXPLORATION_FOV = 45.0
 local DEFAULT_AIMING_FOV = 40.0
 local DEFAULT_CUTSCENE_FOV = 24.0
+local DEFAULT_SPRINTING_FOV = 45.0
+local DEFAULT_EXTRA_FOV = 45.0
 
 local function refresh_player_state()
     local now = os.clock()
@@ -1032,17 +1046,9 @@ local function read_current_fov(camera)
 
     local current_fov = nil
 
-    if camera_get_fov ~= nil then
-        pcall(function()
-            current_fov = camera_get_fov:call(sdk.get_thread_context(), camera)
-        end)
-    end
-
-    if current_fov == nil then
-        pcall(function()
-            current_fov = camera:call("get_FOV")
-        end)
-    end
+    pcall(function()
+        current_fov = camera:call("get_FOV")
+    end)
 
     if current_fov == nil then
         current_fov = safe_get_member(camera, "FOV")
@@ -1212,12 +1218,6 @@ local function apply_fov_for_current_state()
             local restore_fov = state.baseline_fov
 
             pcall(function()
-                if camera_set_fov ~= nil then
-                    camera_set_fov:call(sdk.get_thread_context(), camera, restore_fov)
-                end
-            end)
-
-            pcall(function()
                 camera:call("set_FOV", restore_fov)
             end)
 
@@ -1247,18 +1247,18 @@ local function apply_fov_for_current_state()
     local target_fov = state.selected_fov
 
     if is_fov_unset(target_fov) then
-        local current_fov = read_current_fov(camera)
+        local default_mode_fov = get_default_fov_for_mode(state.selected_mode)
 
-        if current_fov ~= nil then
-            target_fov = current_fov
-            set_mode_fov_if_unset(state.selected_mode, current_fov)
+        if default_mode_fov ~= nil then
+            target_fov = default_mode_fov
+            set_mode_fov_if_unset(state.selected_mode, default_mode_fov)
         else
-            if state.selected_mode == "Aiming" then
-                target_fov = DEFAULT_AIMING_FOV
-            elseif state.selected_mode == "Cutscene" or state.selected_mode == "Cutscene (Normal)" then
-                target_fov = DEFAULT_CUTSCENE_FOV
+            local current_fov = read_current_fov(camera)
+            if current_fov ~= nil then
+                target_fov = current_fov
+                set_mode_fov_if_unset(state.selected_mode, current_fov)
             else
-                target_fov = state.baseline_fov or BASE_GAME_FOV_FALLBACK
+                target_fov = state.baseline_fov or DEFAULT_EXPLORATION_FOV
             end
         end
     end
@@ -1287,12 +1287,6 @@ local function apply_fov_for_current_state()
     end
 
     state.blended_fov = applied_fov
-
-    pcall(function()
-        if camera_set_fov ~= nil then
-            camera_set_fov:call(sdk.get_thread_context(), camera, applied_fov)
-        end
-    end)
 
     pcall(function()
         camera:call("set_FOV", applied_fov)
@@ -1362,12 +1356,6 @@ re.on_script_reset(function()
     local camera = sdk.get_primary_camera()
     if camera ~= nil and state.baseline_fov ~= nil then
         pcall(function()
-            if camera_set_fov ~= nil then
-                camera_set_fov:call(sdk.get_thread_context(), camera, state.baseline_fov)
-            end
-        end)
-
-        pcall(function()
             camera:call("set_FOV", state.baseline_fov)
         end)
 
@@ -1399,20 +1387,18 @@ re.on_draw_ui(function()
     changed = changed or did_change
 
     if imgui.button("Reset FOVs to game defaults") then
-        cfg.exploration_fov = 0.0
+        cfg.exploration_fov = DEFAULT_EXPLORATION_FOV
         cfg.aiming_fov = DEFAULT_AIMING_FOV
-        cfg.sprinting_fov = 0.0
+        cfg.sprinting_fov = DEFAULT_SPRINTING_FOV
         cfg.cutscene_fov = DEFAULT_CUTSCENE_FOV
-        cfg.crouch_fov = 0.0
-        cfg.reload_fov = 0.0
-        cfg.melee_fov = 0.0
+        cfg.crouch_fov = DEFAULT_EXTRA_FOV
+        cfg.reload_fov = DEFAULT_EXTRA_FOV
+        cfg.melee_fov = DEFAULT_EXTRA_FOV
         state.blended_fov = nil
         changed = true
     end
 
-    local ui_fallback = state.baseline_fov or BASE_GAME_FOV_FALLBACK
-
-    local exploration_ui_fov = is_fov_unset(cfg.exploration_fov) and ui_fallback or cfg.exploration_fov
+    local exploration_ui_fov = is_fov_unset(cfg.exploration_fov) and DEFAULT_EXPLORATION_FOV or cfg.exploration_fov
     did_change, exploration_ui_fov = imgui.drag_float("Exploration FOV", exploration_ui_fov, 0.05, 20.0, 170.0)
     if did_change then
         cfg.exploration_fov = exploration_ui_fov
@@ -1426,7 +1412,7 @@ re.on_draw_ui(function()
     end
     changed = changed or did_change
 
-    local sprinting_ui_fov = is_fov_unset(cfg.sprinting_fov) and ui_fallback or cfg.sprinting_fov
+    local sprinting_ui_fov = is_fov_unset(cfg.sprinting_fov) and DEFAULT_SPRINTING_FOV or cfg.sprinting_fov
     did_change, sprinting_ui_fov = imgui.drag_float("Sprinting FOV", sprinting_ui_fov, 0.05, 20.0, 170.0)
     if did_change then
         cfg.sprinting_fov = sprinting_ui_fov
@@ -1458,7 +1444,7 @@ re.on_draw_ui(function()
         did_change, cfg.use_crouch_fov = imgui.checkbox("Use Crouch FOV", cfg.use_crouch_fov)
         changed = changed or did_change
         if cfg.use_crouch_fov then
-            local crouch_ui_fov = is_fov_unset(cfg.crouch_fov) and ui_fallback or cfg.crouch_fov
+            local crouch_ui_fov = is_fov_unset(cfg.crouch_fov) and DEFAULT_EXTRA_FOV or cfg.crouch_fov
             did_change, crouch_ui_fov = imgui.drag_float("Crouch FOV", crouch_ui_fov, 0.05, 20.0, 170.0)
             if did_change then
                 cfg.crouch_fov = crouch_ui_fov
@@ -1469,7 +1455,7 @@ re.on_draw_ui(function()
         did_change, cfg.use_reload_fov = imgui.checkbox("Use Reload FOV", cfg.use_reload_fov)
         changed = changed or did_change
         if cfg.use_reload_fov then
-            local reload_ui_fov = is_fov_unset(cfg.reload_fov) and ui_fallback or cfg.reload_fov
+            local reload_ui_fov = is_fov_unset(cfg.reload_fov) and DEFAULT_EXTRA_FOV or cfg.reload_fov
             did_change, reload_ui_fov = imgui.drag_float("Reload FOV", reload_ui_fov, 0.05, 20.0, 170.0)
             if did_change then
                 cfg.reload_fov = reload_ui_fov
@@ -1480,7 +1466,7 @@ re.on_draw_ui(function()
         did_change, cfg.use_melee_fov = imgui.checkbox("Use Melee FOV", cfg.use_melee_fov)
         changed = changed or did_change
         if cfg.use_melee_fov then
-            local melee_ui_fov = is_fov_unset(cfg.melee_fov) and ui_fallback or cfg.melee_fov
+            local melee_ui_fov = is_fov_unset(cfg.melee_fov) and DEFAULT_EXTRA_FOV or cfg.melee_fov
             did_change, melee_ui_fov = imgui.drag_float("Melee FOV", melee_ui_fov, 0.05, 20.0, 170.0)
             if did_change then
                 cfg.melee_fov = melee_ui_fov
