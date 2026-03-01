@@ -9,23 +9,23 @@ local DEBUG_LOG_PATH = "better_fov_debug_log.json"
 
 local cfg = {
     enabled = true,
-    exploration_fov = 81.0,
-    aiming_fov = 74.0,
-    sprinting_fov = 88.0,
-    cutscene_fov = 75.0,
+    exploration_fov = 0.0,
+    aiming_fov = 40.0,
+    sprinting_fov = 0.0,
+    cutscene_fov = 24.0,
     normal_fov_during_cutscene = true,
     smooth_fov_transitions = true,
     fov_transition_speed = 18.0,
     fov_return_speed = 11.0,
 
     use_crouch_fov = false,
-    crouch_fov = 78.0,
+    crouch_fov = 0.0,
 
     use_reload_fov = false,
-    reload_fov = 72.0,
+    reload_fov = 0.0,
 
     use_melee_fov = false,
-    melee_fov = 82.0,
+    melee_fov = 0.0,
 
     debug_ui = false,
 }
@@ -86,6 +86,10 @@ local state = {
     last_logged_sprinting = false,
     last_logged_cutscene = false,
     last_logged_skip = false,
+
+    ini_profile_name = "default",
+    ini_status = "",
+    ini_status_time = -1000.0,
 
     blended_fov = nil,
     last_fov_apply_time = -1000.0,
@@ -234,6 +238,186 @@ local function clamp(v, min_v, max_v)
     end
 
     return v
+end
+
+local function is_fov_unset(v)
+    return v == nil or v <= 1.0
+end
+
+local function get_mode_cfg_key(mode)
+    if mode == "Exploration" then
+        return "exploration_fov"
+    elseif mode == "Aiming" then
+        return "aiming_fov"
+    elseif mode == "Sprinting" then
+        return "sprinting_fov"
+    elseif mode == "Cutscene" then
+        return "cutscene_fov"
+    elseif mode == "Reload" then
+        return "reload_fov"
+    elseif mode == "Melee" then
+        return "melee_fov"
+    elseif mode == "Crouching" then
+        return "crouch_fov"
+    end
+
+    return nil
+end
+
+local function set_mode_fov_if_unset(mode, fov)
+    local key = get_mode_cfg_key(mode)
+    if key == nil or fov == nil then
+        return false
+    end
+
+    if not is_fov_unset(cfg[key]) then
+        return false
+    end
+
+    cfg[key] = fov
+    json.dump_file(CFG_PATH, cfg)
+    return true
+end
+
+local CFG_TYPES = {
+    enabled = "bool",
+    exploration_fov = "number",
+    aiming_fov = "number",
+    sprinting_fov = "number",
+    cutscene_fov = "number",
+    normal_fov_during_cutscene = "bool",
+    smooth_fov_transitions = "bool",
+    fov_transition_speed = "number",
+    fov_return_speed = "number",
+    use_crouch_fov = "bool",
+    crouch_fov = "number",
+    use_reload_fov = "bool",
+    reload_fov = "number",
+    use_melee_fov = "bool",
+    melee_fov = "number",
+    debug_ui = "bool",
+}
+
+local function sanitize_profile_name(name)
+    local n = tostring(name or "default")
+    n = string.gsub(n, "[^%w_%-]", "")
+
+    if n == "" then
+        n = "default"
+    end
+
+    return n
+end
+
+local function get_ini_path(profile_name)
+    return "better_fov_profiles\\" .. sanitize_profile_name(profile_name) .. ".ini"
+end
+
+local function bool_to_ini(v)
+    return v and "true" or "false"
+end
+
+local function parse_bool(v)
+    local s = string.lower(tostring(v or ""))
+    return s == "true" or s == "1" or s == "yes" or s == "on"
+end
+
+local function serialize_cfg_to_ini()
+    local keys = {
+        "enabled",
+        "exploration_fov",
+        "aiming_fov",
+        "sprinting_fov",
+        "cutscene_fov",
+        "normal_fov_during_cutscene",
+        "smooth_fov_transitions",
+        "fov_transition_speed",
+        "fov_return_speed",
+        "use_crouch_fov",
+        "crouch_fov",
+        "use_reload_fov",
+        "reload_fov",
+        "use_melee_fov",
+        "melee_fov",
+        "debug_ui",
+    }
+
+    local lines = {
+        "; Better FOV profile",
+        "[BetterFOV]",
+    }
+
+    for _, key in ipairs(keys) do
+        local v = cfg[key]
+        local t = CFG_TYPES[key]
+
+        if t == "bool" then
+            table.insert(lines, key .. "=" .. bool_to_ini(v == true))
+        else
+            table.insert(lines, key .. "=" .. tostring(v))
+        end
+    end
+
+    return table.concat(lines, "\n") .. "\n"
+end
+
+local function save_ini_profile(profile_name)
+    local path = get_ini_path(profile_name)
+    local data = serialize_cfg_to_ini()
+
+    local ok, err = pcall(function()
+        fs.write(path, data)
+    end)
+
+    if not ok then
+        return false, tostring(err)
+    end
+
+    return true, path
+end
+
+local function load_ini_profile(profile_name)
+    local path = get_ini_path(profile_name)
+
+    local ok, data_or_err = pcall(function()
+        return fs.read(path)
+    end)
+
+    if not ok or data_or_err == nil or data_or_err == "" then
+        return false, "Profile not found"
+    end
+
+    local data = data_or_err
+
+    for line in string.gmatch(data, "[^\r\n]+") do
+        local trimmed = string.match(line, "^%s*(.-)%s*$")
+
+        if trimmed ~= "" and not string.match(trimmed, "^[;#]") and not string.match(trimmed, "^%[.*%]$") then
+            local key, value = string.match(trimmed, "^([%w_]+)%s*=%s*(.+)$")
+
+            if key ~= nil and CFG_TYPES[key] ~= nil then
+                if CFG_TYPES[key] == "bool" then
+                    cfg[key] = parse_bool(value)
+                elseif CFG_TYPES[key] == "number" then
+                    local num = tonumber(value)
+                    if num ~= nil then
+                        cfg[key] = num
+                    end
+                end
+            end
+        end
+    end
+
+    json.dump_file(CFG_PATH, cfg)
+    state.blended_fov = nil
+    state.last_fov_apply_time = -1000.0
+
+    return true, path
+end
+
+local function set_ini_status(msg)
+    state.ini_status = msg
+    state.ini_status_time = os.clock()
 end
 
 local function smooth_towards(current_value, target_value, speed, dt)
@@ -555,6 +739,9 @@ local SPRINT_WALK_MIN_SPEED = 1.35
 local SPRINT_WALK_MAX_SPEED = 2.02
 local SPRINT_WALK_CANCEL_DELAY = 0.10
 local SPRINT_STOP_CANCEL_DELAY = 0.12
+local BASE_GAME_FOV_FALLBACK = 45.0
+local DEFAULT_AIMING_FOV = 40.0
+local DEFAULT_CUTSCENE_FOV = 24.0
 
 local function refresh_player_state()
     local now = os.clock()
@@ -1057,7 +1244,26 @@ local function apply_fov_for_current_state()
         return
     end
 
-    local target_fov = clamp(state.selected_fov, 20.0, 170.0)
+    local target_fov = state.selected_fov
+
+    if is_fov_unset(target_fov) then
+        local current_fov = read_current_fov(camera)
+
+        if current_fov ~= nil then
+            target_fov = current_fov
+            set_mode_fov_if_unset(state.selected_mode, current_fov)
+        else
+            if state.selected_mode == "Aiming" then
+                target_fov = DEFAULT_AIMING_FOV
+            elseif state.selected_mode == "Cutscene" or state.selected_mode == "Cutscene (Normal)" then
+                target_fov = DEFAULT_CUTSCENE_FOV
+            else
+                target_fov = state.baseline_fov or BASE_GAME_FOV_FALLBACK
+            end
+        end
+    end
+
+    target_fov = clamp(target_fov, 20.0, 170.0)
     local applied_fov = target_fov
 
     if cfg.smooth_fov_transitions then
@@ -1192,16 +1398,46 @@ re.on_draw_ui(function()
     did_change, cfg.enabled = imgui.checkbox("Enabled", cfg.enabled)
     changed = changed or did_change
 
-    did_change, cfg.exploration_fov = imgui.drag_float("Exploration FOV", cfg.exploration_fov, 0.05, 20.0, 170.0)
+    if imgui.button("Reset FOVs to game defaults") then
+        cfg.exploration_fov = 0.0
+        cfg.aiming_fov = DEFAULT_AIMING_FOV
+        cfg.sprinting_fov = 0.0
+        cfg.cutscene_fov = DEFAULT_CUTSCENE_FOV
+        cfg.crouch_fov = 0.0
+        cfg.reload_fov = 0.0
+        cfg.melee_fov = 0.0
+        state.blended_fov = nil
+        changed = true
+    end
+
+    local ui_fallback = state.baseline_fov or BASE_GAME_FOV_FALLBACK
+
+    local exploration_ui_fov = is_fov_unset(cfg.exploration_fov) and ui_fallback or cfg.exploration_fov
+    did_change, exploration_ui_fov = imgui.drag_float("Exploration FOV", exploration_ui_fov, 0.05, 20.0, 170.0)
+    if did_change then
+        cfg.exploration_fov = exploration_ui_fov
+    end
     changed = changed or did_change
 
-    did_change, cfg.aiming_fov = imgui.drag_float("Aiming FOV", cfg.aiming_fov, 0.05, 20.0, 170.0)
+    local aiming_ui_fov = is_fov_unset(cfg.aiming_fov) and DEFAULT_AIMING_FOV or cfg.aiming_fov
+    did_change, aiming_ui_fov = imgui.drag_float("Aiming FOV", aiming_ui_fov, 0.05, 20.0, 170.0)
+    if did_change then
+        cfg.aiming_fov = aiming_ui_fov
+    end
     changed = changed or did_change
 
-    did_change, cfg.sprinting_fov = imgui.drag_float("Sprinting FOV", cfg.sprinting_fov, 0.05, 20.0, 170.0)
+    local sprinting_ui_fov = is_fov_unset(cfg.sprinting_fov) and ui_fallback or cfg.sprinting_fov
+    did_change, sprinting_ui_fov = imgui.drag_float("Sprinting FOV", sprinting_ui_fov, 0.05, 20.0, 170.0)
+    if did_change then
+        cfg.sprinting_fov = sprinting_ui_fov
+    end
     changed = changed or did_change
 
-    did_change, cfg.cutscene_fov = imgui.drag_float("Cutscene FOV", cfg.cutscene_fov, 0.05, 20.0, 170.0)
+    local cutscene_ui_fov = is_fov_unset(cfg.cutscene_fov) and DEFAULT_CUTSCENE_FOV or cfg.cutscene_fov
+    did_change, cutscene_ui_fov = imgui.drag_float("Cutscene FOV", cutscene_ui_fov, 0.05, 20.0, 170.0)
+    if did_change then
+        cfg.cutscene_fov = cutscene_ui_fov
+    end
     changed = changed or did_change
 
     did_change, cfg.normal_fov_during_cutscene = imgui.checkbox("Normal FOV during cutscene", cfg.normal_fov_during_cutscene)
@@ -1222,21 +1458,33 @@ re.on_draw_ui(function()
         did_change, cfg.use_crouch_fov = imgui.checkbox("Use Crouch FOV", cfg.use_crouch_fov)
         changed = changed or did_change
         if cfg.use_crouch_fov then
-            did_change, cfg.crouch_fov = imgui.drag_float("Crouch FOV", cfg.crouch_fov, 0.05, 20.0, 170.0)
+            local crouch_ui_fov = is_fov_unset(cfg.crouch_fov) and ui_fallback or cfg.crouch_fov
+            did_change, crouch_ui_fov = imgui.drag_float("Crouch FOV", crouch_ui_fov, 0.05, 20.0, 170.0)
+            if did_change then
+                cfg.crouch_fov = crouch_ui_fov
+            end
             changed = changed or did_change
         end
 
         did_change, cfg.use_reload_fov = imgui.checkbox("Use Reload FOV", cfg.use_reload_fov)
         changed = changed or did_change
         if cfg.use_reload_fov then
-            did_change, cfg.reload_fov = imgui.drag_float("Reload FOV", cfg.reload_fov, 0.05, 20.0, 170.0)
+            local reload_ui_fov = is_fov_unset(cfg.reload_fov) and ui_fallback or cfg.reload_fov
+            did_change, reload_ui_fov = imgui.drag_float("Reload FOV", reload_ui_fov, 0.05, 20.0, 170.0)
+            if did_change then
+                cfg.reload_fov = reload_ui_fov
+            end
             changed = changed or did_change
         end
 
         did_change, cfg.use_melee_fov = imgui.checkbox("Use Melee FOV", cfg.use_melee_fov)
         changed = changed or did_change
         if cfg.use_melee_fov then
-            did_change, cfg.melee_fov = imgui.drag_float("Melee FOV", cfg.melee_fov, 0.05, 20.0, 170.0)
+            local melee_ui_fov = is_fov_unset(cfg.melee_fov) and ui_fallback or cfg.melee_fov
+            did_change, melee_ui_fov = imgui.drag_float("Melee FOV", melee_ui_fov, 0.05, 20.0, 170.0)
+            if did_change then
+                cfg.melee_fov = melee_ui_fov
+            end
             changed = changed or did_change
         end
 
@@ -1279,6 +1527,34 @@ re.on_draw_ui(function()
         imgui.text("Reloading: " .. tostring(state.is_reloading))
         imgui.text("Crouching: " .. tostring(state.is_crouching))
         imgui.text("Melee: " .. tostring(state.is_melee))
+    end
+
+    imgui.separator()
+    _, state.ini_profile_name = imgui.input_text("INI Profile", state.ini_profile_name)
+
+    if imgui.button("SAVE INI") then
+        local ok, info = save_ini_profile(state.ini_profile_name)
+        if ok then
+            set_ini_status("Saved INI: " .. info)
+        else
+            set_ini_status("Save failed: " .. tostring(info))
+        end
+    end
+
+    imgui.same_line()
+
+    if imgui.button("LOAD INI") then
+        local ok, info = load_ini_profile(state.ini_profile_name)
+        if ok then
+            set_ini_status("Loaded INI: " .. info)
+            changed = true
+        else
+            set_ini_status("Load failed: " .. tostring(info))
+        end
+    end
+
+    if state.ini_status ~= "" and (os.clock() - state.ini_status_time) <= 8.0 then
+        imgui.text(state.ini_status)
     end
 
     if changed then
